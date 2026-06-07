@@ -35,9 +35,24 @@ async def notify_expiring():
         except Exception:
             pass
 
+async def disable_expired_clients():
+    from services.xui import delete_client
+    with db.get_conn() as conn:
+        expired = conn.execute(
+            "SELECT xui_uuid, server_id FROM subscriptions WHERE expires_at <= datetime('now') AND xui_uuid IS NOT NULL"
+        ).fetchall()
+        for sub in expired:
+            try:
+                await delete_client(sub["xui_uuid"], sub["server_id"] or "s1")
+            except Exception:
+                pass
+        conn.execute(
+            "DELETE FROM subscriptions WHERE expires_at <= datetime('now')"
+        )
+
 async def check_ton_payments():
     from services.ton import find_transaction_by_comment
-    from services.xui import add_client
+    from services.xui import add_client, get_least_loaded_server
     from config import PLANS
 
     with db.get_conn() as conn:
@@ -53,8 +68,9 @@ async def check_ton_payments():
             paid = await find_transaction_by_comment(p["payload"], plan["ton"])
             if paid:
                 db.confirm_payment(p["payload"])
-                xui_uuid = db.create_subscription(p["tg_id"], plan["name"], plan["days"])
-                await add_client(xui_uuid, p["tg_id"], plan["days"])
+                server = get_least_loaded_server()
+                xui_uuid, server_id = db.create_subscription(p["tg_id"], plan["name"], plan["days"], server["id"])
+                await add_client(xui_uuid, p["tg_id"], plan["days"], server_id)
                 await bot.send_message(
                     p["tg_id"],
                     f"✅ <b>TON оплата подтверждена!</b>\n\n"
@@ -70,6 +86,7 @@ async def main():
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(notify_expiring, "interval", hours=12)
+    scheduler.add_job(disable_expired_clients, "interval", minutes=10)
     scheduler.add_job(check_ton_payments, "interval", seconds=60)
     scheduler.start()
 
